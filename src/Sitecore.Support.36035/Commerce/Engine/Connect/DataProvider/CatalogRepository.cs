@@ -3,10 +3,6 @@
     using Newtonsoft.Json;
     using Newtonsoft.Json.Linq;
     using Sitecore.Commerce.Engine.Connect.DataProvider.Caching;
-    using Sitecore.Commerce.Plugin.Catalog;
-    using Sitecore.Commerce.Plugin.ManagedLists;
-    using Sitecore.Commerce.Plugin.Shops;
-    using Sitecore.Commerce.ServiceProxy;
     using Sitecore.Data;
     using Sitecore.Diagnostics;
     using Sitecore.Globalization;
