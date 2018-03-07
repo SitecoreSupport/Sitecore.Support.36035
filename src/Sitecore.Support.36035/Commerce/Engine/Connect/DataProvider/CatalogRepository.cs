@@ -25,9 +25,9 @@
     /// </summary>
     public class CatalogRepository
     {
-        private readonly string _language;
-        private string Environment;
-        private static object mappingLock = new object();
+        private readonly string _Language;
+        private string _Environment;
+        private static object _MappingLock = new object();
 
         /// <summary>
         /// Class used for storing mappings
@@ -104,7 +104,7 @@
         /// <param name="language">The language.</param>
         public CatalogRepository(string language = "en-US")
         {
-            _language = language;
+            _Language = language;
         }
         private List<JToken> GetCatalogItems()
         {
@@ -117,15 +117,15 @@
             Log.Info("Commerce.Connector - Loading the mapping entries", this);
             Log.Info("Commerce.Connector - Attempting to connect to CE", this);
 
-            if (string.IsNullOrEmpty(Environment))
+            if (string.IsNullOrEmpty(_Environment))
             {
-                Environment = CommerceEngineConfiguration.Instance.DefaultEnvironment;
+                _Environment = CommerceEngineConfiguration.Instance.DefaultEnvironment;
             }
 
             // Load all CatalogItems in batch of 100
             while (skip < totalItemCount)
             {
-                var formattedResponse = InvokeHttpClientGet($"GetCatalogItems(environmentName='{Environment}',skip={skip},take=100)?$expand=CatalogItems($select=Id,SitecoreId,ParentCatalogList,ParentCategoryList,ChildrenCategoryList,ChildrenSellableItemList,ItemVariations)", true, false);
+                var formattedResponse = InvokeHttpClientGet($"GetCatalogItems(environmentName='{_Environment}',skip={skip},take=100)?$expand=CatalogItems($select=Id,SitecoreId,ParentCatalogList,ParentCategoryList,ChildrenCategoryList,ChildrenSellableItemList,ItemVariations)", true, false);
 
                 if (string.IsNullOrEmpty(formattedResponse))
                 {
@@ -380,7 +380,7 @@
         private HttpClient GetClient(bool useCommerceOps = false)
         {
             var configuration = CommerceEngineConfiguration.Instance;
-            this.Environment = configuration.DefaultEnvironment;
+            this._Environment = configuration.DefaultEnvironment;
 
             HttpClient client = null;
 
@@ -400,7 +400,7 @@
             }
 
             client.DefaultRequestHeaders.Add("ShopName", configuration.DefaultShopName);
-            client.DefaultRequestHeaders.Add("Language", this._language);
+            client.DefaultRequestHeaders.Add("Language", this._Language);
             client.DefaultRequestHeaders.Add("Currency", configuration.DefaultShopCurrency);
             client.DefaultRequestHeaders.Add("Environment", configuration.DefaultEnvironment);
 
@@ -430,7 +430,7 @@
             {
                 Log.Info("Commerce.Connector - Acquiring mapping lock", this);
 
-                lock (mappingLock)
+                lock (_MappingLock)
                 {
                     Log.Info("Commerce.Connector - Mapping locked", this);
 
