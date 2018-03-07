@@ -110,7 +110,44 @@
         {
             _language = language;
         }
+        private List<JToken> GetCatalogItems()
+        {
+            MappingEntriesLastUpdatedUtc = DateTime.UtcNow;
+            List<JToken> catalogItems = new List<JToken>();
 
+            var skip = 0;
+            var totalItemCount = 1;
+
+            Log.Info("Commerce.Connector - Loading the mapping entries", this);
+            Log.Info("Commerce.Connector - Attempting to connect to CE", this);
+
+            if (string.IsNullOrEmpty(Environment))
+            {
+                Environment = CommerceEngineConfiguration.Instance.DefaultEnvironment;
+            }
+
+            // Load all CatalogItems in batch of 100
+            while (skip < totalItemCount)
+            {
+                var formattedResponse = InvokeHttpClientGet($"GetCatalogItems(environmentName='{Environment}',skip={skip},take=100)?$expand=CatalogItems($select=Id,SitecoreId,ParentCatalogList,ParentCategoryList,ChildrenCategoryList,ChildrenSellableItemList,ItemVariations)", true, false);
+
+                if (string.IsNullOrEmpty(formattedResponse))
+                {
+                    Log.Error("Commerce.Connector - There was an error retrieving the mappings from the Commerce Service", this);
+                    return new List<JToken>();
+                }
+
+                Log.Info($"Commerce.Connector - Processing response from CE. Skipping {skip} items", this);
+
+                var value = JsonConvert.DeserializeObject<JObject>(formattedResponse, JsonSettings);
+                catalogItems.AddRange(value["CatalogItems"]);
+                totalItemCount = value["TotalItemCount"].Value<int>();
+                skip += 100;
+            }
+
+            Log.Info($"Commerce.Connector - Total CatalogItems count {totalItemCount}", this);
+            return catalogItems;
+        }
 
         public string InvokeHttpClientGet(string serviceCallUrl, bool useCommerceOps = false, bool raiseException = true)
         {
@@ -150,46 +187,8 @@
         {
             var localMappingEntries = new Dictionary<string, string>();
             var localParentIds = new ConcurrentBag<MappingEntry>();
-            //var localParentIds = new List<KeyValuePair<string, string>>();
-
-            var skip = 0;
-            var totalItemCount = 1;
-
-            Log.Info("Commerce.Connector - Loading the mapping entries", this);
-
-            Log.Info("Commerce.Connector - Attempting to connect to CE", this);
-
-            if (string.IsNullOrEmpty(Environment))
-            {
-                Environment = CommerceEngineConfiguration.Instance.DefaultEnvironment;
-            }
-
             MappingEntriesLastUpdatedUtc = DateTime.UtcNow;
-            List<JToken> catalogItems = new List<JToken>();
-
-            // Load all CatalogItems in batch of 100
-            while (skip < totalItemCount)
-            {
-                var formattedResponse = InvokeHttpClientGet($"GetCatalogItems(environmentName='{Environment}',skip={skip},take=100)?$expand=CatalogItems($select=Id,SitecoreId,ParentCatalogList,ParentCategoryList,ChildrenCategoryList,ChildrenSellableItemList,ItemVariations)", true, false);
-
-                if (string.IsNullOrEmpty(formattedResponse))
-                {
-                    ParentIds = new ConcurrentBag<MappingEntry>(localParentIds);
-                    MappingEntries = new ConcurrentDictionary<string, string>(localMappingEntries);
-                    Log.Error("Commerce.Connector - There was an error retrieving the mappings from the Commerce Service", this);
-                    return;
-                }
-
-                Log.Info($"Commerce.Connector - Processing response from CE. Skipping {skip} items", this);
-
-                var value = JsonConvert.DeserializeObject<JObject>(formattedResponse, JsonSettings);
-                catalogItems.AddRange(value["CatalogItems"]);
-                totalItemCount = value["TotalItemCount"].Value<int>();
-
-                skip += 100;
-            }
-
-            Log.Info($"Commerce.Connector - Total CatalogItems count {totalItemCount}", this);
+            List<JToken> catalogItems = GetCatalogItems();
 
             foreach (var item in catalogItems)
             {
@@ -198,83 +197,35 @@
                 var sitecoreId = item["SitecoreId"].Value<string>();
                 var type = item["@odata.type"].Value<string>();
                 var parentCategoryString = item["ParentCategoryList"].Value<string>();
+                var parentCatalogString = item["ParentCatalogList"].Value<string>();
 
                 localMappingEntries.Add(sitecoreId, entityId);
 
+                // Check if we have any parent category present on the item
                 if (!string.IsNullOrEmpty(parentCategoryString))
                 {
-                    // Get the list of parent categories
-                    var parentCategoryList = parentCategoryString.Split('|');
-
-                    foreach (var parentCategory in parentCategoryList)
-                    {
-                        // Get the parent category
-                        var parentCategoryItem = catalogItems.FirstOrDefault(c => c["SitecoreId"].Value<string>() == parentCategory);
-
-                        if (parentCategoryItem != null)
-                        {
-                            // Create a unique MappingEntry for the parent category => category relationships
-                            var childCategoryId = item["SitecoreId"].Value<string>();
-                            var parentCategoryId = parentCategoryItem["SitecoreId"].Value<string>();
-                            var pathId = GuidUtils.GetDeterministicGuidString(childCategoryId + "|" + parentCategoryId);
-                            var itemEntityId = item["Id"].Value<string>();
-
-                            MappingEntry entry = new MappingEntry { PathId = pathId, SitecoreId = childCategoryId, ParentId = parentCategoryId, EntityId = itemEntityId };
-                            localParentIds.Add(entry);
-                            //localParentIds.Add(new KeyValuePair<string, string>(childId, parentId));
-                            localMappingEntries.Add(pathId, entityId);
-                        }
-                    }
+                    MapParentCategories(localMappingEntries, localParentIds, catalogItems, item, entityId, type, parentCategoryString);
                 }
 
-                // Create an MappingEntry for the category => parent catalog.
-                if (type == "#Sitecore.Commerce.Plugin.Catalog.Category")
+                // Determine the action based on the item type
+                switch (type)
                 {
-                    var parentCatalogString = item["ParentCatalogList"].Value<string>();
-                    if (!string.IsNullOrEmpty(parentCatalogString))
-                    {
-                        var parentCatalogList = item["ParentCatalogList"].Value<string>().Split('|');
-                        foreach (var parentCatalog in parentCatalogList)
-                        {
-                            var itemId = item["SitecoreId"].Value<string>();
-                            var itemEntityId = item["Id"].Value<string>();
-
-                            MappingEntry entry = new MappingEntry { PathId = itemId, SitecoreId = itemId, ParentId = parentCatalog, EntityId = itemEntityId };
-                            localParentIds.Add(entry);
-                            //localParentIds.Add(new KeyValuePair<string, string>(item["SitecoreId"].Value<string>(), parentCatalog));
-                        }
-                    }
-                }
-                // Create an entry for the variation => sellable item
-                else if (type == "#Sitecore.Commerce.Plugin.Catalog.SellableItem")
-                {
-                    var itemVariations = item["ItemVariations"].Value<string>();
-                    if (!string.IsNullOrEmpty(itemVariations))
-                    {
-                        var itemVariationList = itemVariations.Split('|');
-                        foreach (var itemVariationId in itemVariationList)
-                        {
-                            var variationEntityId = $"{entityId}|{itemVariationId}";
-                            var variationSitecoreId = GuidUtils.GetDeterministicGuidString(variationEntityId);
-
-                            MappingEntry entry = new MappingEntry { PathId = variationSitecoreId, SitecoreId = variationSitecoreId, ParentId = sitecoreId, EntityId = variationEntityId };
-                            localParentIds.Add(entry);
-
-                            localMappingEntries.Add(variationSitecoreId, variationEntityId);
-                            //localParentIds.Add(new KeyValuePair<string, string>(variationSitecoreId, sitecoreId));
-                        }
-                    }
-                }
-                else if (type == "#Sitecore.Commerce.Plugin.Catalog.Catalog")
-                {
-                    // Create an entry for the catalog => catalogs folder
-                    var catalogId = item["SitecoreId"].Value<string>();
-                    var catalogFolderId = KnownItemIds.CatalogsItem.Guid.ToString();
-                    var pathId = catalogId;
-                    var itemEntityId = item["Id"].Value<string>();
-
-                    MappingEntry entry = new MappingEntry { PathId = pathId, SitecoreId = catalogId, ParentId = catalogFolderId, EntityId = itemEntityId };
-                    localParentIds.Add(entry);
+                    case "#Sitecore.Commerce.Plugin.Catalog.Category":
+                        // Create an MappingEntry for the category => parent catalog.
+                        MapCategoryToCatalog(localParentIds, item);
+                        break;
+                    case "#Sitecore.Commerce.Plugin.Catalog.SellableItem":
+                        // Create an entry for the variation => sellable item
+                        MapSellableItems(localMappingEntries, localParentIds, item, entityId, sitecoreId);
+                        // Create an entry for the sellableitem => catalog
+                        MapSellableItemToCatalog(localMappingEntries, localParentIds, item);
+                        break;
+                    case "#Sitecore.Commerce.Plugin.Catalog.Catalog":
+                        // Create entries for the catalogs folder to catalog
+                        MapCatalogs(localParentIds, item);
+                        break;
+                    default:
+                        break;
                 }
             }
 
@@ -282,6 +233,124 @@
             MappingEntries = new ConcurrentDictionary<string, string>(localMappingEntries);
 
             Log.Info(string.Format("Commerce.Connector - Loaded the mapping entries - {0} Entries, {1} Parents", ParentIds.Count, MappingEntries.Count), this);
+        }
+
+        private void MapCatalogs(ConcurrentBag<MappingEntry> localParentIds, JToken item)
+        {
+            // Create an entry for the catalog => catalogs folder
+            var catalogId = item["SitecoreId"].Value<string>();
+            var catalogFolderId = KnownItemIds.CatalogsItem.Guid.ToString();
+            var pathId = catalogId;
+            var itemEntityId = item["Id"].Value<string>();
+
+            MappingEntry entry = new MappingEntry { PathId = pathId, SitecoreId = catalogId, ParentId = catalogFolderId, EntityId = itemEntityId };
+            localParentIds.Add(entry);
+        }
+
+        private void MapSellableItems(Dictionary<string, string> localMappingEntries, ConcurrentBag<MappingEntry> localParentIds, JToken item, string entityId, string sitecoreId)
+        {
+            var itemVariations = item["ItemVariations"].Value<string>();
+
+            if (!string.IsNullOrEmpty(itemVariations))
+            {
+                var itemVariationList = itemVariations.Split('|');
+                foreach (var itemVariationId in itemVariationList)
+                {
+                    var variationEntityId = $"{entityId}|{itemVariationId}";
+                    var variationSitecoreId = GuidUtils.GetDeterministicGuidString(variationEntityId);
+
+                    MappingEntry entry = new MappingEntry { PathId = variationSitecoreId, SitecoreId = variationSitecoreId, ParentId = sitecoreId, EntityId = variationEntityId };
+                    localParentIds.Add(entry);
+                    localMappingEntries.Add(variationSitecoreId, variationEntityId);
+
+                    // Create a mapping between the variant and its parents by combining the variation entity Id and the parent path Id
+                    var parents = localParentIds.Where(p => p.EntityId == entityId);
+                    foreach (var parent in parents)
+                    {
+                        var parentPathId = parent.PathId;
+                        var pathId = GuidUtils.GetDeterministicGuidString($"{variationEntityId}|{parentPathId}");
+                        MappingEntry categoryEntry = new MappingEntry { PathId = pathId, SitecoreId = pathId, ParentId = parentPathId, EntityId = variationEntityId };
+                        localParentIds.Add(categoryEntry);
+                        localMappingEntries.Add(pathId, variationEntityId);
+                    }
+                }
+            }
+        }
+
+        private void MapCategoryToCatalog(ConcurrentBag<MappingEntry> localParentIds, JToken item)
+        {
+            var parentCatalogString = item["ParentCatalogList"].Value<string>();
+            if (!string.IsNullOrEmpty(parentCatalogString))
+            {
+                var parentCatalogList = parentCatalogString.Split('|');
+                foreach (var parentCatalog in parentCatalogList)
+                {
+                    var itemId = item["SitecoreId"].Value<string>();
+                    var itemEntityId = item["Id"].Value<string>();
+
+                    MappingEntry entry = new MappingEntry { PathId = itemId, SitecoreId = itemId, ParentId = parentCatalog, EntityId = itemEntityId };
+                    localParentIds.Add(entry);
+                }
+            }
+        }
+
+        private void MapSellableItemToCatalog(Dictionary<string, string> localMappingEntries, ConcurrentBag<MappingEntry> localParentIds, JToken item)
+        {
+            var sitecoreId = item["SitecoreId"].Value<string>();
+            var parentCatalogString = item["ParentCatalogList"].Value<string>();
+
+            // Create an MappingEntry for the sellable item => parent catalog.
+            if (!string.IsNullOrEmpty(parentCatalogString))
+            {
+                var parentCatalogList = parentCatalogString.Split('|');
+                foreach (var parentCatalogId in parentCatalogList)
+                {
+                    var sellableItemEntityId = $"{sitecoreId}|{parentCatalogId}";
+                    var sellableItemSitecoreId = GuidUtils.GetDeterministicGuidString(sellableItemEntityId);
+                    var itemId = item["SitecoreId"].Value<string>();
+                    var itemEntityId = item["Id"].Value<string>();
+
+                    MappingEntry entry = new MappingEntry { PathId = sellableItemSitecoreId, SitecoreId = itemId, ParentId = parentCatalogId, EntityId = itemEntityId };
+                    localParentIds.Add(entry);
+
+                    localMappingEntries.Add(sellableItemSitecoreId, itemEntityId);
+                }
+            }
+        }
+
+        private void MapParentCategories(Dictionary<string, string> localMappingEntries, ConcurrentBag<MappingEntry> localParentIds, List<JToken> catalogItems, JToken item, string entityId, string type, string parentCategoryString)
+        {
+            // Get the list of parent categories
+            var parentCategoryList = parentCategoryString.Split('|');
+
+            foreach (var parentCategory in parentCategoryList)
+            {
+                // Get the parent category
+                var parentCategoryItem = catalogItems.FirstOrDefault(c => c["SitecoreId"].Value<string>() == parentCategory);
+
+                if (parentCategoryItem != null)
+                {
+                    // Create a unique MappingEntry for the parent category => category relationships
+                    var itemId = item["SitecoreId"].Value<string>();
+                    var parentCategoryId = parentCategoryItem["SitecoreId"].Value<string>();
+                    var pathId = GuidUtils.GetDeterministicGuidString(itemId + "|" + parentCategoryId);
+                    var itemEntityId = item["Id"].Value<string>();
+                    MappingEntry entry = null;
+
+                    // Categories are not using a deterministic path Id since they are catalog specific
+                    if (type == "#Sitecore.Commerce.Plugin.Catalog.Category")
+                    {
+                        entry = new MappingEntry { PathId = itemId, SitecoreId = itemId, ParentId = parentCategoryId, EntityId = itemEntityId };
+                    }
+                    else
+                    {
+                        entry = new MappingEntry { PathId = pathId, SitecoreId = itemId, ParentId = parentCategoryId, EntityId = itemEntityId };
+                    }
+
+                    localParentIds.Add(entry);
+                    localMappingEntries.Add(pathId, entityId);
+                }
+            }
         }
 
         /// <summary>
